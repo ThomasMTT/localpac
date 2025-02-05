@@ -1,0 +1,495 @@
+#!/bin/bash
+# Local packages manager
+
+usage() {
+    echo -e "Usage: localpac [options] [package_names]\n"
+    echo -e "Use localpac -h for help"
+    exit 0
+}
+
+# Help function
+help() {
+    echo -e "\nLocal Packages Manager Help Menu\n"
+    echo -e "Usage: localpac [options] [package_names]\n"
+    echo -e "Options:"
+    echo -e "  -S                Install the specified packages."
+    echo -e "  -R                Remove the specified packages."
+    echo -e "  -P <prefix>       Add a prefix to the installed package's executables."
+    echo -e "  -L <link_to>      Create a symbolic link from the package's virtual environment."
+    echo -e "  -l                List installed packages."
+    echo -e "  -p                Specify Python as the package's language (optional)."
+    echo -e "  -r                Specify Ruby as the package's language (optional)."
+    echo -e "  -g                Specify Go as the package's language (optional)."    
+    echo -e "  -h                Display this help menu."
+    echo -e "\nExamples:"
+    echo -e "  localpac -l                                 #  List all installed packages."
+    echo -e "  localpac -l -p                              #  List all installed python packages."
+    echo -e "  localpac -S package_names                   # Install a package."
+    echo -e "  localpac -S https://github.com/user/project # Install a package from github by link."
+    echo -e "  localpac -S user/project                    # Install a package from github by user/project."
+    echo -e "  localpac -S -r package_names                # Install a ruby package."
+    echo -e "  localpac -R package_names                   # Remove a package."
+    echo -e "  localpac -R -p package_names                # Remove a python package."
+    echo -e "  localpac -P myprefix- package_names         # Add a prefix to package commands."
+    echo -e "  localpac -S -P myprefix- package_names      # Install a package and prefix its commands."
+    echo -e "  localpac -L /link/to/dir package_names      # Link package's directory to link/to/dir."
+    echo -e "  localpac -S -g -L ~/tools package_repos     # Install go packages, and link to ~/tools/package_names"
+    echo -e "  localpac -R -r -L ~/tools package_names     # Uninstall ruby packages, unlink link at ~/tools/package_names"
+    echo -e "  localpac -S -r -L ~/ -P cmd- package_names  # Install ruby packages., link to ~/ and prefix exec files with cmd-"
+
+    echo -e "\nNote: You can install packages directly from a Git repository by using its github url as package name"
+    echo -e "Note: If no language is specified, the script will automatically search for the package's language. (slower)"
+    echo -e "Note: If multiple languages are found for a package, you will be prompted to choose one."
+    echo -e "Note: If using -L flag with -R flag the specified packages will be unlinked from the selected directory"
+    exit 0
+}
+
+list_packages() {
+    case "$LANGUAGE" in
+        python | ruby | go)
+            venv_var_str=$(echo "$LANGUAGE"_VENVS | tr '[:lower:]' '[:upper:]')
+            ls "${!venv_var_str}/" --color=auto
+            ;;
+        *)
+            ls "$LOCALPAC_HOME"/*/venvs/ --color=auto
+            ;;
+    esac
+    exit 0
+}
+
+set_constants() {
+    # Program main directory
+    LOCALPAC_HOME=$HOME/.local/share/localpac
+
+    # LOCAL_BIN paths
+    LOCAL_BIN=$HOME/.local/bin
+
+    # PIPX enviroment variables
+    export PIPX_BIN_DIR=$LOCAL_BIN/python
+    export PIPX_HOME=$LOCALPAC_HOME/python
+
+    # Python
+    PYTHON_BIN_DIR=$LOCAL_BIN/python
+    PYTHON_VENVS="$LOCALPAC_HOME/python/venvs"
+
+    # Ruby
+    RUBY_BIN_DIR=$LOCAL_BIN/ruby
+    RUBY_VENVS=$LOCALPAC_HOME/ruby/venvs
+
+    # Go
+    GO_BIN_DIR=$LOCAL_BIN/go
+    GO_VENVS="$LOCALPAC_HOME/go/venvs"
+}
+
+manage_required_programs() {
+
+    # Install programs if not present
+    which pipx &>/dev/null || sudo pacman -S --noconfirm python-pipx || exit $?
+    which go   &>/dev/null || sudo pacman -S --noconfirm go || exit $?
+    which jq   &>/dev/null || sudo pacman -S --noconfirm jq || exit $?
+    which gem  &>/dev/null || sudo pacman -S --noconfirm ruby || exit $?
+    which git  &>/dev/null || sudo pacman -S --noconfirm git || exit $?
+
+    if ! which bundler &>/dev/null; then 
+        gem install bundler || exit $?
+        bundle_path=$(find "$HOME"/.local/share/gem/ruby/*/bin/bundle | head -n1)
+        if [[ -n $bundle_path ]]; then
+            ln -s "$bundle_path" "$RUBY_BIN_DIR"
+            ln -s "$bundle_path"r "$RUBY_BIN_DIR"
+        fi
+    fi
+}
+
+manage_system_paths() {
+
+    # Create required directories if they dont exist
+    [ -d "$PYTHON_BIN_DIR" ] || mkdir -p "$PYTHON_BIN_DIR"
+    [ -d "$PYTHON_VENVS" ] || mkdir -p "$PYTHON_VENVS"
+    [ -d "$RUBY_BIN_DIR" ] || mkdir -p "$RUBY_BIN_DIR"
+    [ -d "$RUBY_VENVS" ] || mkdir -p "$RUBY_VENVS"
+    [ -d "$GO_BIN_DIR" ] || mkdir -p "$GO_BIN_DIR"
+    [ -d "$GO_VENVS" ] || mkdir -p "$GO_VENVS"
+
+    # Make list of required paths that are not present
+    paths_to_add=()
+    echo "$PATH" | grep -q "^$LOCAL_BIN:\|:$LOCAL_BIN:\|:$LOCAL_BIN$" || paths_to_add+=("$LOCAL_BIN")
+    echo "$PATH" | grep -q "^$PYTHON_BIN_DIR:\|:$PYTHON_BIN_DIR:\|:$PYTHON_BIN_DIR$" || paths_to_add+=("$PYTHON_BIN_DIR")
+    echo "$PATH" | grep -q "^$RUBY_BIN_DIR:\|:$RUBY_BIN_DIR:\|:$RUBY_BIN_DIR$" || paths_to_add+=("$RUBY_BIN_DIR")
+    echo "$PATH" | grep -q "^$GO_BIN_DIR:\|:$GO_BIN_DIR:\|:$GO_BIN_DIR$" || paths_to_add+=("$GO_BIN_DIR")
+
+    # Add paths from list to line if list contains any and add export paths in current shell
+    line=""
+    for path in "${paths_to_add[@]}"; do
+        export PATH=$PATH:path
+        line=$line:$path
+    done
+
+    # Add paths line to $($SHELL)rc
+    if [[ -n $line ]]; then
+        line="\n# Added by localpac:\nexport PATH=\$PATH$line"
+        shell=$(basename "$SHELL" || "bash")
+        echo "adding custom paths to .$shell"rc
+        echo -e "$line" >>~/."$shell"rc
+    fi
+}
+
+is_valid_url() {
+    local url="$1"
+    local valid_url_regex='^https?://[^\s/$.?#].[^\s]*/[^\s/$.?#].[^\s].*'
+    [[ $url =~ $valid_url_regex ]]
+}
+
+is_valid_full_name() {
+    local full_name=$1
+    local valid_full_name_regex='^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$'
+    [[ $full_name =~ $valid_full_name_regex ]]
+}
+
+remove_broken_sysmlinks() {
+    find "$1" -xtype l -exec rm {} \;
+}
+
+is_installed() {
+    case "$LANGUAGE" in
+        python | ruby | go)
+            venv_var_str=$(echo "$LANGUAGE"_VENVS | tr '[:lower:]' '[:upper:]')
+            [ -d "${!venv_var_str}/$PACKAGE/" ]
+            return $?
+            ;;
+        *)  
+            [ -d "$PYTHON_VENVS/$PACKAGE/" ] && LANGUAGE="python" && return 0
+            [ -d "$RUBY_VENVS/$PACKAGE/" ] && LANGUAGE="ruby" && return 0
+            [ -d "$GO_VENVS/$PACKAGE/" ] && LANGUAGE="go" && return 0
+            return 1
+            ;;
+    esac
+}
+
+check_github() {
+    local link=""
+    link=$(echo "$PACKAGE" | grep -o 'https\?://[^\s/$.?#].[^\s]*/[^\s/$.?#].[^\s].*')
+
+    if is_valid_url "$link"; then
+        full_name_lc=$(echo "$link" | cut -d '/' -f 4-5)
+        if is_valid_full_name "$full_name_lc"; then
+            PACKAGE=$full_name_lc
+        else
+            echo "User or Project not found from URL: $link" && return 1
+        fi
+    fi
+
+    if is_valid_full_name "$PACKAGE"; then
+        tempfile=$(mktemp)
+
+        # Repo info
+        curl -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/$PACKAGE" > "$tempfile"
+
+        [[ $(jq .status < "$tempfile") != "null" ]] && return 1
+
+        PACKAGE=$(jq .name < "$tempfile" | tr -d "\"" | tr '[:upper:]' '[:lower:]')
+        REPO_FULL_NAME=$(jq .full_name < "$tempfile" | tr -d "\"") # Required as $PACKAGE is fully lowercase
+        REPO_LANGUAGE=$(jq .language < "$tempfile" | tr -d "\"")
+
+        # Repo tags
+        curl -s -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/"$REPO_FULL_NAME"/tags > "$tempfile"
+        REPO_LATEST_TAG_VERSION=$(jq -r '.[0]' < "$tempfile" | jq .name | tr -d "\"" | tr "." " " | awk '{print $1}')
+        [[ -z $REPO_LATEST_TAG_VERSION ]] && REPO_LATEST_TAG_VERSION="" &&  [[ "$LANGUAGE" == "go" ]] && echo "No version tag found for repo, using v1"
+        
+        rm "$tempfile"
+    fi
+}
+
+search_packages() {
+    local PACKAGE_LANGUAGES=()
+
+    # Check for Ruby package
+    if gem search -r -e "$PACKAGE" | grep -q "$PACKAGE"; then
+        PACKAGE_LANGUAGES+=("ruby")
+    fi
+
+    # Check for Python package
+    if pip index versions "$PACKAGE" &>/dev/null; then
+        PACKAGE_LANGUAGES+=("python")
+    fi
+
+    if [[ ${#PACKAGE_LANGUAGES[@]} -gt 1 ]]; then
+
+        echo "$PACKAGE found for ${PACKAGE_LANGUAGES[*]}"
+        while true; do
+
+            specify_line="Specify:\n"
+            for package_language in "${PACKAGE_LANGUAGES[@]}"; do
+                specify_line=+$(echo "$package_language" | cut -c 1)" -> $package_language\n"
+            done
+            echo -e "$specify_line\ns -> skip package"
+
+            read -r user_input
+            case "$user_input" in
+            "p")
+                LANGUAGE=python
+                ;;
+            "r")
+                LANGUAGE=ruby
+                ;;
+            "s")
+                echo "Skipping $PACKAGE"
+                return 1
+                ;;
+            *) 
+                continue
+                ;;
+            esac
+        done
+    else
+        LANGUAGE=${PACKAGE_LANGUAGES[0]}
+        if [ -n "$LANGUAGE" ]; then
+            echo "Found $PACKAGE for $LANGUAGE, yay!"
+        else
+            echo "$PACKAGE not found for any language"
+            return 1
+        fi
+    fi
+}
+
+#### Python Functions ####
+python_install() {
+    if [[ -n $REPO_FULL_NAME ]]; then
+        pipx install "git+https://github.com/$REPO_FULL_NAME" || exit $?
+    else 
+        pipx install "$PACKAGE" || exit $?
+    fi
+
+    for file in $(find "$PYTHON_BIN_DIR" -name "*.py"); do
+        mv "$file" $(echo $file | sed 's/.py$//g')
+    done
+}
+
+
+python_uninstall() {
+    pipx uninstall "$PACKAGE"
+    remove_broken_sysmlinks "$PYTHON_BIN_DIR"
+}
+####
+
+#### Ruby Functions ####
+ruby_install() {
+
+    create_ruby_command_wrapper() {
+        executable_name=$(basename "$executable")
+        executable_name_no_ext="${executable_name%.rb}"
+        wrapper="$RUBY_VENVS/$PACKAGE/bin/$executable_name_no_ext".sh
+        echo -e "#!/bin/bash\nGEM_HOME=$RUBY_VENVS/$PACKAGE $executable \$@" >"$wrapper"
+        chmod +x "$wrapper"
+        ln -s "$wrapper" "$RUBY_BIN_DIR/$executable_name_no_ext"
+    }
+
+    mkdir "$RUBY_VENVS/$PACKAGE" 2>/dev/null
+
+    if [[ -z "$REPO_FULL_NAME" ]]; then
+        echo "Installing $PACKAGE from rubygems"
+
+        # shellcheck disable=SC2115
+        ! gem install "$PACKAGE" --install-dir "$RUBY_VENVS/$PACKAGE" && rm -rf "$RUBY_VENVS/$PACKAGE" 2>/dev/null && exit 1
+
+        executable=$(find "$RUBY_VENVS/$PACKAGE/bin" -type f -name "$PACKAGE*" \
+            -exec sh -c 'grep -q "^#!/.*ruby$" "$1" && echo "$1"' _ {} \;)
+
+        echo "Adding to bin: $executable"
+        create_ruby_command_wrapper
+
+    else
+        echo "Installing $PACKAGE from Github"
+        git clone https://github.com/"$REPO_FULL_NAME" "$RUBY_VENVS/$PACKAGE"
+
+        GEMFILE_PATH="$RUBY_VENVS/$PACKAGE/Gemfile"
+        GEMSPEC_PATH="$RUBY_VENVS/$PACKAGE/$PACKAGE.gemspec"
+
+        if [[ -f $GEMSPEC_PATH ]]; then
+
+            gem=$(gem build "$GEMSPEC_PATH" | tail -1 | awk '{print $2}')
+
+            if [[ -f $gem ]]; then
+                mv "$RUBY_VENVS/$PACKAGE" "$RUBY_VENVS/$PACKAGE-git"
+                gem install "$RUBY_VENVS/$PACKAGE-git" --install-dir "$RUBY_VENVS/$PACKAGE" || exit 1
+                rm -rf "$RUBY_VENVS/$PACKAGE-git"
+            fi
+
+            executable=$(find "$RUBY_VENVS/$PACKAGE/bin" -type f -name "$PACKAGE*" \
+                -exec sh -c 'grep -q "^#!/.*ruby$" "$1" && echo "$1"' _ {} \;)
+
+            echo "adding to bin: $executable"
+            create_ruby_command_wrapper "$executable"
+
+        elif [[ -f $GEMFILE_PATH ]]; then
+            bundler install --gemfile="$GEMFILE_PATH" --path "$RUBY_VENVS/$PACKAGE/.bundle" || exit 1
+
+            executable=$(find "$RUBY_VENVS/$PACKAGE/" -type f -name "$PACKAGE*" \
+                -exec sh -c 'grep -q "^#!/.*ruby$" "$1" && echo "$1"' _ {} \;)
+
+            # Create wrapper scripts and link them to $RUBY_BIN_DIR
+            executable_name=$(basename "$executable")
+            executable_name_no_ext="${executable_name%.rb}"
+            wrapper="$RUBY_VENVS/$PACKAGE/$executable_name_no_ext".sh
+            echo -e "#!/bin/bash\nBUNDLE_GEMFILE=$GEMFILE_PATH bundle exec $executable \$@" >"$wrapper"
+            chmod +x "$wrapper"
+            ln -s "$wrapper" "$RUBY_BIN_DIR/$executable_name_no_ext"
+
+        else
+            echo "$PACKAGE has no Gemspec or Gemfile to install, try by name instead"
+        fi
+    fi
+}
+
+ruby_uninstall() {
+    # shellcheck disable=SC2115
+    rm -rf "$RUBY_VENVS/$PACKAGE"
+    remove_broken_sysmlinks "$RUBY_BIN_DIR"
+    echo "$PACKAGE has been removed"
+}
+####
+
+#### Go Functions ####
+go_install() {
+    if [[ -n $REPO_FULL_NAME ]]; then
+
+        export GOBIN="$GO_VENVS/$PACKAGE"
+        export GOPATH="$HOME/.localpac"
+        mkdir -p "$GOBIN"
+
+        # Add / if sem version exists
+        [ -n "$REPO_LATEST_TAG_VERSION" ] && REPO_FULL_NAME="$REPO_FULL_NAME/"
+
+        # Install binaries in venv dir
+        go install "github.com/${REPO_FULL_NAME}${REPO_LATEST_TAG_VERSION}@latest" && echo "$PACKAGE has been installed"
+         
+        export GOBIN=""
+
+        # Link binaries to bin dir
+        find "$GO_VENVS/$PACKAGE/" -maxdepth 1 -type f -exec ln -s {} "$GO_BIN_DIR/" 2>/dev/null \;
+
+        # Give write permissions to remove and do so
+        chmod +w -R "$HOME/.localpac"
+        rm -rf "$HOME/.localpac"
+
+    else 
+        echo "Go requires a github repo link, not a package name, try another language or specify the correct link"
+    fi
+}
+
+go_uninstall() {
+    # shellcheck disable=SC2115
+    rm -rf "$GO_VENVS/$PACKAGE"
+    remove_broken_sysmlinks "$GO_BIN_DIR"
+    echo "$PACKAGE has been removed"
+}
+####
+
+
+set_constants
+# Get args
+while getopts ":SRP:L:lprghd" opt; do
+    case $opt in
+    S)
+        MODE="Install"          ;;
+    R)
+        MODE="Uninstall"        ;;
+    P)
+        PREFIX="${OPTARG%/}"    ;;
+    L)
+        LINK_TO="${OPTARG%/}"   ;;
+    p)
+        LANGUAGE="python"       ;;
+    r)
+        LANGUAGE="ruby"         ;;
+    g)
+        LANGUAGE="go"           ;;
+    l)
+        DO_LIST=true    ;;
+    h)
+        help            ;;
+    *)
+        usage           ;;
+    esac
+done
+[ "$DO_LIST" == "true" ] && list_packages
+
+manage_system_paths
+manage_required_programs
+
+shift $((OPTIND - 1))
+for arg in "$@"; do
+    PACKAGE=$(echo "$arg" | tr '[:upper:]' '[:lower:]')
+
+    # Get info from github and skip package if url is invalid
+    check_github || continue
+      
+
+    # Detect language of package
+    if [[ -z $LANGUAGE && $MODE == "Install" ]]; then
+
+        if [[ -n $REPO_LANGUAGE ]]; then  
+            LANGUAGE=$(echo "$REPO_LANGUAGE" | tr '[:upper:]' '[:lower:]')
+        else 
+            echo "No language selected... searching the web..."
+            search_packages || continue
+        fi 
+    fi
+
+    
+    if [[ $MODE == "Install" ]]; then
+        # Install
+        case "$LANGUAGE" in
+            python | ruby | go)
+                "$LANGUAGE"_install
+                ;;
+        esac
+    
+    elif [[ $MODE == "Uninstall" ]]; then
+        # Unlink
+        if [[ -n $LINK_TO ]]; then
+            echo "unlinking $PACKAGE at $LINK_TO"
+            unlink "$LINK_TO/$PACKAGE" 2>/dev/null
+        fi
+        # Uninstall 
+        ! is_installed && echo "$PACKAGE is not installed" && continue
+        case "$LANGUAGE" in
+            python | ruby | go)
+                "$LANGUAGE"_uninstall
+                ;;
+        esac
+    fi
+
+    # If not uninstalling
+    if [[ $MODE != "Uninstall" ]]; then
+
+        # Link to $LINK_TO if using the -L flag
+        if [[ -n $LINK_TO ]]; then
+            ! is_installed && echo "$PACKAGE will not be linked" && continue
+
+            echo "linking $PACKAGE to $LINK_TO"
+            mkdir -p "$LINK_TO/" 2>/dev/null
+            
+            case "$LANGUAGE" in
+                python | ruby | go)
+                    venv_var_str=$(echo "$LANGUAGE"_VENVS | tr '[:lower:]' '[:upper:]')
+                    ln -s "${!venv_var_str}"/"$PACKAGE"/ "$LINK_TO" 2>/dev/null   
+                    ;;
+            esac
+        fi
+
+        # Prefix binaries if using -P flag
+        if [[ -n $PREFIX ]]; then
+            ! is_installed && echo "$PACKAGE is not installed" && continue
+
+            case "$LANGUAGE" in
+                python | ruby | go)
+                    venv_var_str=$(echo "$LANGUAGE"_VENVS | tr '[:lower:]' '[:upper:]')
+                    bin_var_str=$(echo "$LANGUAGE"_LOCAL_BIN | tr '[:lower:]' '[:upper:]')
+                    for file in $(ls -ll "${!bin_var_str}" | grep "${!venv_var_str}/$PACKAGE/" | awk '{print $9}'); do
+                        mv "${!bin_var_str}/$file" "${!bin_var_str}/$PREFIX$(basename "$file")"
+                    done
+                    ;;
+            esac
+        fi
+    fi
+done
