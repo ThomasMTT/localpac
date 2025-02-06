@@ -411,6 +411,8 @@ while getopts ":SRP:L:lprghd" opt; do
         usage           ;;
     esac
 done
+
+[ -z "$1" ] && usage
 [ "$DO_LIST" == "true" ] && list_packages
 
 manage_system_paths
