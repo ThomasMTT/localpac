@@ -56,3 +56,6 @@ To install **localpac** run the command below and reload your terminal
 
 `curl -L https://raw.githubusercontent.com/ThomasMTT/localpac/refs/heads/main/localpac --output localpac && chmod +x localpac && ./localpac - && mv localpac ~/.local/bin`
 
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
