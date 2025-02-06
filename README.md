@@ -58,4 +58,4 @@ To install **localpac** run the command below and reload your terminal
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
+This project is licensed under the Apache v2 License. See the [LICENSE](LICENSE) file for more details.
